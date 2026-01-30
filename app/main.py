@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
 
 from .database import engine
 from .database import SessionLocal
@@ -11,6 +12,9 @@ from .models import Round
 from sqlalchemy.orm import Session
 from .schemas import RoundOut
 from typing import Optional
+from .schemas import RoundCreate, RoundOut
+
+
 
 
 app = FastAPI(title="Lottery Backend")
@@ -42,6 +46,14 @@ def startup_event():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.post("/rounds", response_model=RoundOut)
+def create_round(payload: RoundCreate, db: Session = Depends(get_db)):
+    new_round = Round(status=payload.status)
+    db.add(new_round)
+    db.commit()
+    db.refresh(new_round)  # reload from DB so id/created_at are filled in
+    return new_round
 
 @app.get("/rounds/current")
 def get_current_round(db: Session = Depends(get_db)):

@@ -2,6 +2,11 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
+
+
+class RoundCreate(BaseModel):
+    status: str = "open"
+    
 class RoundOut(BaseModel):
     round_id: str
     status: str
