@@ -10,6 +10,7 @@ from fastapi import Header, HTTPException
 import os
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from datetime import datetime
 
 app = FastAPI(title="Lottery Backend")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -134,4 +135,39 @@ def save_token_config(payload: TokenConfigIn, db: Session = Depends(get_db),
         "message": "Token configuration saved",
         "mint_address": config.mint_address,
         "min_hold_amount": config.min_hold_amount,
+    }
+
+@app.post("/api/admin/holders/preview")
+def preview_holders(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin)
+):
+    config = db.query(AdminConfig).first()
+
+    if config is None:
+        raise HTTPException(status_code=500, detail="Admin config missing")
+
+    if not config.mint_address or not config.min_hold_amount:
+        raise HTTPException(
+            status_code=400,
+            detail="Token config not set"
+        )
+
+    # ---- MOCK DATA (will be replaced with Helius later) ----
+    total_holders = 12482
+    eligible_holders = 3194
+    excluded_lp = 3
+    excluded_burn = 1
+    # -------------------------------------------------------
+
+    return {
+        "token": config.mint_address,
+        "min_hold_amount": config.min_hold_amount,
+        "total_holders": total_holders,
+        "eligible_holders": eligible_holders,
+        "excluded": {
+            "lp_accounts": excluded_lp,
+            "burn_addresses": excluded_burn
+        },
+        "preview_time": datetime.utcnow().isoformat()
     }
