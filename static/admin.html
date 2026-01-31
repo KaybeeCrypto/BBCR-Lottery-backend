@@ -70,6 +70,11 @@
       opacity: 0.8;
     }
 
+    .status.success {
+      color: #4ade80; /* green */
+      font-weight: 500;
+    }
+
     .spinner {
       display: inline-block;
       width: 14px;
@@ -114,7 +119,7 @@
     <input id="mintInput" />
     <label>Minimum Hold Amount</label>
     <input id="minHoldInput" type="number" />
-    <button onclick="saveToken()">Save Token Config</button>
+    <button id="btnSaveToken" onclick="saveToken()">Save Token Config</button>
     <div class="status" id="tokenStatus">—</div>
   </div>
 
@@ -184,7 +189,9 @@ function stopLoading(id) {
   const b = document.getElementById(id);
   const s = b.querySelector(".spinner");
   if (s) s.remove();
+  b.disabled = false; // ✅ IMPORTANT: re-enable the button
 }
+
 
 function setButtonDisabled(id, d) {
   const el = document.getElementById(id);
@@ -206,14 +213,22 @@ async function adminFetch(path, options = {}) {
   const secret = getSecret();
   if (!secret) throw new Error("Not authenticated");
 
+  const headers = {
+    "X-Admin-Secret": secret,
+    ...(options.headers || {}),
+  };
+
+  // Only set JSON content-type if we are sending a body
+  if (options.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+
   return fetch(API_BASE + path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Secret": secret
-    }
+    headers
   });
 }
+
 
 function clearCountdown() {
   if (countdownInterval) {
@@ -283,6 +298,67 @@ async function loadState() {
     revealCountdown.textContent = "—";
   }
 }
+async function saveToken() {
+  const mint = document.getElementById("mintInput").value.trim();
+  const minHoldRaw = document.getElementById("minHoldInput").value;
+  const minHold = Number(minHoldRaw);
+  const statusEl = document.getElementById("tokenStatus");
+
+  if (!mint || !Number.isFinite(minHold) || minHold < 0) {
+    statusEl.textContent = "Invalid input (mint + min hold required)";
+    statusEl.className = "status";
+    return;
+  }
+
+  startLoading("btnSaveToken");
+  statusEl.textContent = "Saving token config…";
+  statusEl.className = "status";
+
+  try {
+    const res = await adminFetch("/api/admin/token", {
+      method: "POST",
+      body: JSON.stringify({
+        mint_address: mint,
+        min_hold_amount: Math.floor(minHold),
+      })
+    });
+
+    // Read raw text first (works for JSON, HTML, or plain text)
+    const raw = await res.text();
+
+    // Try to parse JSON, but don't crash if it's not JSON
+    let data = null;
+    try { data = JSON.parse(raw); } catch {}
+
+    if (!res.ok) {
+      const msg =
+        (data && (data.detail || data.message)) ||
+        raw ||
+        `Save failed (HTTP ${res.status})`;
+      throw new Error(msg);
+    }
+
+    // ✅ Success feedback
+    statusEl.textContent = "✅ Token config saved successfully";
+    statusEl.className = "status success";
+
+    // Optional: show what backend saved (helps confirm it actually changed)
+    // statusEl.textContent = `✅ Saved: ${data.mint_address} / min ${data.min_hold_amount}`;
+
+    // Clear dependent UI
+    document.getElementById("previewOutput").textContent = "—";
+    document.getElementById("snapshotOutput").textContent = "—";
+
+    await loadState();
+
+  } catch (err) {
+    statusEl.textContent = err?.message || "Error saving token config";
+    statusEl.className = "status";
+  } finally {
+    stopLoading("btnSaveToken");
+  }
+}
+
 
 async function previewHolders() {
   startLoading("btnPreview");
