@@ -36,7 +36,6 @@ def parse_canonical_wallets(canonical: str):
     return wallets
 
 # --- Helius helpers (DAS getTokenAccounts) ---
-# Docs: POST https://mainnet.helius-rpc.com/?api-key=... method=getTokenAccounts :contentReference[oaicite:1]{index=1}
 
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/"
@@ -45,6 +44,44 @@ HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/"
 BURN_ADDRESSES = {
     "11111111111111111111111111111111",
 }
+
+def helius_get_current_slot() -> int:
+    """
+    Fetch the current Solana slot using Helius RPC (getSlot).
+    """
+    if not HELIUS_API_KEY:
+        raise HTTPException(status_code=500, detail="HELIUS_API_KEY not configured")
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "slot",
+        "method": "getSlot",
+        "params": []
+    }
+
+    try:
+        r = requests.post(
+            f"{HELIUS_RPC_URL}?api-key={HELIUS_API_KEY}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Helius RPC failed: {str(e)}")
+
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Helius error {r.status_code}: {r.text}")
+
+    data = r.json()
+    if "error" in data:
+        raise HTTPException(status_code=502, detail=f"Helius RPC error: {data['error']}")
+
+    result = data.get("result")
+    if result is None:
+        raise HTTPException(status_code=500, detail="Helius returned no slot")
+
+    return int(result)
+
 
 def helius_get_blockhash_at_slot(slot: int) -> str:
     """
@@ -378,7 +415,10 @@ def start_reveal_phase(reveal_minutes: int = 15, db: Session = Depends(get_db), 
     if config.commit_deadline is None or datetime.utcnow() < config.commit_deadline:
         raise HTTPException(status_code=400, detail="Commit deadline not reached")
 
-    config.target_slot = 999_999_999
+    current_slot = helius_get_current_slot()
+    slot_offset = 200  # ~ about 1–2 minutes on Solana; safe buffer
+    config.target_slot = current_slot + slot_offset
+
     config.reveal_deadline = datetime.utcnow() + timedelta(minutes=reveal_minutes)
     config.round_state = "REVEAL"
     db.commit()
@@ -401,6 +441,17 @@ def finalize_winner(db: Session = Depends(get_db), _: None = Depends(require_adm
 
     if config.winner_wallet:
         raise HTTPException(status_code=400, detail="Winner already finalized")
+
+    current_slot = helius_get_current_slot()
+    if config.target_slot is None:
+        raise HTTPException(status_code=400, detail="Target slot not set")
+
+    if current_slot < int(config.target_slot):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target slot not reached (current_slot={current_slot}, target_slot={config.target_slot})"
+        )
+
 
     blockhash = helius_get_blockhash_at_slot(config.target_slot)
 
