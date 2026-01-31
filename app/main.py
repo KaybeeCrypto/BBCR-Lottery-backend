@@ -256,3 +256,44 @@ def start_commit_phase(
         "commit_deadline": commit_deadline.isoformat(),
         "commit_minutes": commit_minutes
     }
+
+@app.post("/api/admin/reveal/start")
+def start_reveal_phase(
+    reveal_minutes: int = 15,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin)
+):
+    config = db.query(AdminConfig).first()
+
+    if config is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Admin config missing"
+        )
+
+    # Enforce correct state
+    if config.round_state != "COMMIT":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot start reveal phase in current state"
+        )
+
+    now = datetime.utcnow()
+
+    # Placeholder future slot (will be replaced by Solana RPC later)
+    target_slot = 999_999_999
+
+    reveal_deadline = now + timedelta(minutes=reveal_minutes)
+
+    config.round_state = "REVEAL"
+    config.target_slot = target_slot
+    config.reveal_deadline = reveal_deadline
+
+    db.commit()
+
+    return {
+        "state": config.round_state,
+        "target_slot": target_slot,
+        "reveal_deadline": reveal_deadline.isoformat(),
+        "reveal_minutes": reveal_minutes
+    }
