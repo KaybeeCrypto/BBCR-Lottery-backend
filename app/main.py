@@ -10,7 +10,7 @@ from fastapi import Header, HTTPException
 import os
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 import hashlib
 import requests
@@ -34,6 +34,30 @@ def parse_canonical_wallets(canonical: str):
         wallet, _ = line.split(":", 1)
         wallets.append(wallet)
     return wallets
+
+# --- UX / API time helpers (important for reliable JS timers) ---
+
+def utcnow() -> datetime:
+    # Keep using naive UTC consistently in DB operations (matches your existing code),
+    # but always format outbound timestamps as "YYYY-MM-DDTHH:MM:SSZ" to be JS-safe.
+    return datetime.utcnow()
+
+def iso_utc_z(dt: datetime):
+    if not dt:
+        return None
+    # Ensure no microseconds + explicit UTC marker.
+    # This avoids JS Date parsing bugs and keeps timers reliable.
+    return dt.replace(microsecond=0).isoformat() + "Z"
+
+def pretty_utc(dt: datetime):
+    if not dt:
+        return None
+    # Human-readable, audit-friendly string (UTC).
+    # Example: "2026-01-31 19:05:49 UTC"
+    return dt.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+# Minimal safety to prevent "instant rounds" by accident
+MIN_PHASE_SECONDS = 10
 
 # --- Helius helpers (DAS getTokenAccounts) ---
 
@@ -270,6 +294,10 @@ def require_admin(x_admin_secret: str = Header(None)):
 @app.get("/api/admin/state")
 def get_admin_state(db: Session = Depends(get_db), _: None = Depends(require_admin)):
     config = db.query(AdminConfig).first()
+    if not config:
+        raise HTTPException(status_code=500, detail="AdminConfig row missing in DB")
+
+    # UX: always return JS-safe timestamps + human-readable UTC strings
     return {
         "token": {
             "mint_address": config.mint_address,
@@ -277,15 +305,22 @@ def get_admin_state(db: Session = Depends(get_db), _: None = Depends(require_adm
         },
         "snapshot": {
             "snapshot_id": config.snapshot_id,
-            "snapshot_time": config.snapshot_time,
+            "snapshot_time": iso_utc_z(config.snapshot_time),
+            "snapshot_time_utc": pretty_utc(config.snapshot_time),
             "snapshot_slot": config.snapshot_slot,
             "eligible_holders": config.eligible_holders,
         },
         "round": {
             "state": config.round_state,
-            "commit_deadline": config.commit_deadline,
-            "reveal_deadline": config.reveal_deadline,
+            "commit_deadline": iso_utc_z(config.commit_deadline),
+            "commit_deadline_utc": pretty_utc(config.commit_deadline),
+            "reveal_deadline": iso_utc_z(config.reveal_deadline),
+            "reveal_deadline_utc": pretty_utc(config.reveal_deadline),
+            # Helpful for UI / audits
+            "target_slot": getattr(config, "target_slot", None),
+            "winner_wallet": getattr(config, "winner_wallet", None),
         },
+        "server_time_utc": pretty_utc(utcnow()),
     }
 
 @app.post("/api/admin/token")
@@ -339,7 +374,8 @@ def preview_holders(db: Session = Depends(get_db), _: None = Depends(require_adm
             "burn_addresses": excluded_burn
         },
         "last_indexed_slot": last_slot,
-        "preview_time": datetime.utcnow().isoformat(),
+        "preview_time": iso_utc_z(utcnow()),
+        "preview_time_utc": pretty_utc(utcnow()),
     }
 
 @app.post("/api/admin/snapshot")
@@ -353,7 +389,7 @@ def take_snapshot(db: Session = Depends(get_db), _: None = Depends(require_admin
         raise HTTPException(status_code=400, detail="Token config not set")
 
     snapshot_id = str(uuid.uuid4())
-    snapshot_time = datetime.utcnow()
+    snapshot_time = utcnow()
 
     # Pull real on-chain token accounts from Helius
     last_slot, token_accounts = helius_get_token_accounts_all(config.mint_address, limit=1000)
@@ -389,60 +425,99 @@ def take_snapshot(db: Session = Depends(get_db), _: None = Depends(require_admin
 
     return {
         "snapshot_id": snapshot_id,
-        "snapshot_time": snapshot_time.isoformat(),
+        "snapshot_time": iso_utc_z(snapshot_time),
+        "snapshot_time_utc": pretty_utc(snapshot_time),
         "snapshot_slot": snapshot_slot,
         "eligible_holders": eligible_holders,
         "snapshot_root": snapshot_root,
         "state": config.round_state,
     }
 
+# --- Commit / Reveal: updated to support seconds + safe timestamps + UX guardrails ---
+
 @app.post("/api/admin/commit/start")
-def start_commit_phase(commit_minutes: int = 30, db: Session = Depends(get_db), _: None = Depends(require_admin)):
+def start_commit_phase(
+    commit_seconds: int = 1800,  # default 30 minutes
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin)
+):
     config = db.query(AdminConfig).first()
+    if not config:
+        raise HTTPException(status_code=500, detail="AdminConfig row missing in DB")
+
     if config.round_state != "SNAPSHOT_TAKEN":
         raise HTTPException(status_code=400, detail="Cannot start commit phase in current state")
 
-    config.commit_deadline = datetime.utcnow() + timedelta(minutes=commit_minutes)
+    # UX guardrail: prevent accidental 0-second or ultra-short rounds
+    if commit_seconds is None or int(commit_seconds) < MIN_PHASE_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"commit_seconds must be >= {MIN_PHASE_SECONDS}"
+        )
+
+    config.commit_deadline = utcnow() + timedelta(seconds=int(commit_seconds))
     config.round_state = "COMMIT"
     db.commit()
 
     return {
         "state": config.round_state,
-        "commit_deadline": config.commit_deadline.isoformat(),
+        "commit_deadline": iso_utc_z(config.commit_deadline),
+        "commit_deadline_utc": pretty_utc(config.commit_deadline),
+        "commit_seconds": int(commit_seconds),
     }
 
 @app.post("/api/admin/reveal/start")
-def start_reveal_phase(reveal_minutes: int = 15, db: Session = Depends(get_db), _: None = Depends(require_admin)):
+def start_reveal_phase(
+    reveal_seconds: int = 900,  # default 15 minutes
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin)
+):
     config = db.query(AdminConfig).first()
+    if not config:
+        raise HTTPException(status_code=500, detail="AdminConfig row missing in DB")
 
     if config.round_state != "COMMIT":
         raise HTTPException(status_code=400, detail="Cannot start reveal phase in current state")
 
-    if config.commit_deadline is None or datetime.utcnow() < config.commit_deadline:
+    if config.commit_deadline is None or utcnow() < config.commit_deadline:
         raise HTTPException(status_code=400, detail="Commit deadline not reached")
+
+    # UX guardrail: prevent accidental instant reveal window
+    if reveal_seconds is None or int(reveal_seconds) < MIN_PHASE_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"reveal_seconds must be >= {MIN_PHASE_SECONDS}"
+        )
 
     current_slot = helius_get_current_slot()
     slot_offset = 200  # ~ about 1–2 minutes on Solana; safe buffer
     config.target_slot = current_slot + slot_offset
 
-    config.reveal_deadline = datetime.utcnow() + timedelta(minutes=reveal_minutes)
+    config.reveal_deadline = utcnow() + timedelta(seconds=int(reveal_seconds))
     config.round_state = "REVEAL"
     db.commit()
 
     return {
         "state": config.round_state,
         "target_slot": config.target_slot,
-        "reveal_deadline": config.reveal_deadline.isoformat(),
+        "reveal_deadline": iso_utc_z(config.reveal_deadline),
+        "reveal_deadline_utc": pretty_utc(config.reveal_deadline),
+        "reveal_seconds": int(reveal_seconds),
     }
 
 @app.post("/api/admin/finalize")
 def finalize_winner(db: Session = Depends(get_db), _: None = Depends(require_admin)):
     config = db.query(AdminConfig).first()
+    if not config:
+        raise HTTPException(status_code=500, detail="AdminConfig row missing in DB")
 
     if config.round_state != "REVEAL":
         raise HTTPException(status_code=400, detail="Cannot finalize in current state")
 
-    if datetime.utcnow() < config.reveal_deadline:
+    if config.reveal_deadline is None:
+        raise HTTPException(status_code=400, detail="Reveal deadline not set")
+
+    if utcnow() < config.reveal_deadline:
         raise HTTPException(status_code=400, detail="Reveal deadline not reached")
 
     if config.winner_wallet:
@@ -457,7 +532,6 @@ def finalize_winner(db: Session = Depends(get_db), _: None = Depends(require_adm
             status_code=400,
             detail=f"Target slot not reached (current_slot={current_slot}, target_slot={config.target_slot})"
         )
-
 
     blockhash = helius_get_blockhash_at_slot(config.target_slot)
 
@@ -490,6 +564,7 @@ def finalize_winner(db: Session = Depends(get_db), _: None = Depends(require_adm
             "hash_algorithm": "sha256",
         },
     }
+
 @app.post("/api/admin/round/reset")
 def reset_round(
     db: Session = Depends(get_db),
