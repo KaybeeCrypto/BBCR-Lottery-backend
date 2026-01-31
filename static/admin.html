@@ -42,6 +42,12 @@
       border-radius: 4px;
     }
 
+    .time-inputs input {
+      width: 80px;
+      display: inline-block;
+      margin-right: 8px;
+    }
+
     button {
       margin-top: 16px;
       padding: 10px 16px;
@@ -67,12 +73,24 @@
     .status {
       margin-top: 12px;
       font-size: 0.9rem;
-      opacity: 0.8;
+      opacity: 0.85;
     }
 
     .status.success {
-      color: #4ade80; /* green */
+      color: #4ade80;
       font-weight: 500;
+    }
+
+    .countdown-big {
+      font-size: 1.4rem;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+
+    .countdown-muted {
+      font-size: 0.95rem;
+      opacity: 0.7;
+      margin-top: 6px;
     }
 
     .spinner {
@@ -125,14 +143,9 @@
 
   <div class="box">
     <h2>Reset Round</h2>
-
-    <button id="btnResetRound" onclick="resetRound()">
-      Reset Round
-    </button>
-
+    <button id="btnResetRound" onclick="resetRound()">Reset Round</button>
     <pre id="resetOutput">—</pre>
   </div>
-
 
   <div class="box">
     <h2>Snapshot Preview</h2>
@@ -148,18 +161,28 @@
 
   <div class="box">
     <h2>Commit Phase</h2>
-    <input id="commitMinutesInput" type="number" value="5" min="1" />
+    <div class="time-inputs">
+      <input id="commitH" type="number" min="0" value="0" /> h
+      <input id="commitM" type="number" min="0" max="59" value="5" /> m
+      <input id="commitS" type="number" min="0" max="59" value="0" /> s
+    </div>
     <button id="btnCommit" onclick="startCommit()">Start Commit</button>
     <pre id="commitOutput">—</pre>
-    <div class="status" id="commitCountdown">—</div>
+    <div class="countdown-big" id="commitCountdown">—</div>
+    <div class="status" id="commitDeadlineUtc"></div>
   </div>
 
   <div class="box">
-    <h2>Reveal Phase</h2>
-    <input id="revealMinutesInput" type="number" value="5" min="1" />
+    <h2>Reveal Phase <span style="opacity:.6">(admin buffer)</span></h2>
+    <div class="time-inputs">
+      <input id="revealH" type="number" min="0" value="0" /> h
+      <input id="revealM" type="number" min="0" max="59" value="5" /> m
+      <input id="revealS" type="number" min="0" max="59" value="0" /> s
+    </div>
     <button id="btnReveal" onclick="startReveal()">Start Reveal</button>
     <pre id="revealOutput">—</pre>
-    <div class="status" id="revealCountdown">—</div>
+    <div class="countdown-muted" id="revealCountdown">—</div>
+    <div class="status" id="revealDeadlineUtc"></div>
   </div>
 
   <div class="box">
@@ -189,9 +212,8 @@ function stopLoading(id) {
   const b = document.getElementById(id);
   const s = b.querySelector(".spinner");
   if (s) s.remove();
-  b.disabled = false; // ✅ IMPORTANT: re-enable the button
+  b.disabled = false;
 }
-
 
 function setButtonDisabled(id, d) {
   const el = document.getElementById(id);
@@ -215,20 +237,15 @@ async function adminFetch(path, options = {}) {
 
   const headers = {
     "X-Admin-Secret": secret,
-    ...(options.headers || {}),
+    ...(options.headers || {})
   };
 
-  // Only set JSON content-type if we are sending a body
   if (options.body && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
 
-  return fetch(API_BASE + path, {
-    ...options,
-    headers
-  });
+  return fetch(API_BASE + path, { ...options, headers });
 }
-
 
 function clearCountdown() {
   if (countdownInterval) {
@@ -237,12 +254,19 @@ function clearCountdown() {
   }
 }
 
-function startCountdown(deadlineISO, outputId) {
+function startCountdown(deadlineISO, outputId, utcLabelId) {
   clearCountdown();
   const output = document.getElementById(outputId);
+  const utcLabel = document.getElementById(utcLabelId);
+
+  const deadline = Date.parse(deadlineISO);
+  if (isNaN(deadline)) {
+    output.textContent = "⏳ invalid deadline";
+    return;
+  }
 
   function tick() {
-    const diff = new Date(deadlineISO).getTime() - Date.now();
+    const diff = deadline - Date.now();
     if (diff <= 0) {
       output.textContent = "⏳ 00:00";
       clearCountdown();
@@ -255,6 +279,10 @@ function startCountdown(deadlineISO, outputId) {
 
   tick();
   countdownInterval = setInterval(tick, 1000);
+}
+
+function getSeconds(h, m, s) {
+  return Number(h.value||0)*3600 + Number(m.value||0)*60 + Number(s.value||0);
 }
 
 async function saveSecret() {
@@ -287,78 +315,68 @@ async function loadState() {
   clearCountdown();
 
   if (data.round.state === "COMMIT" && data.round.commit_deadline) {
-    startCountdown(data.round.commit_deadline, "commitCountdown");
+    startCountdown(
+      data.round.commit_deadline,
+      "commitCountdown",
+      "commitDeadlineUtc"
+    );
+    commitDeadlineUtc.textContent = `Deadline: ${data.round.commit_deadline_utc}`;
   } else {
     commitCountdown.textContent = "—";
+    commitDeadlineUtc.textContent = "";
   }
 
   if (data.round.state === "REVEAL" && data.round.reveal_deadline) {
-    startCountdown(data.round.reveal_deadline, "revealCountdown");
+    startCountdown(
+      data.round.reveal_deadline,
+      "revealCountdown",
+      "revealDeadlineUtc"
+    );
+    revealDeadlineUtc.textContent = `Deadline: ${data.round.reveal_deadline_utc}`;
   } else {
     revealCountdown.textContent = "—";
+    revealDeadlineUtc.textContent = "";
   }
 }
-async function saveToken() {
-  const mint = document.getElementById("mintInput").value.trim();
-  const minHoldRaw = document.getElementById("minHoldInput").value;
-  const minHold = Number(minHoldRaw);
-  const statusEl = document.getElementById("tokenStatus");
 
-  if (!mint || !Number.isFinite(minHold) || minHold < 0) {
-    statusEl.textContent = "Invalid input (mint + min hold required)";
-    statusEl.className = "status";
-    return;
-  }
+async function startCommit() {
+  const seconds = getSeconds(commitH, commitM, commitS);
+  if (seconds < 10) return alert("Commit duration must be at least 10 seconds");
 
-  startLoading("btnSaveToken");
-  statusEl.textContent = "Saving token config…";
-  statusEl.className = "status";
-
+  startLoading("btnCommit");
   try {
-    const res = await adminFetch("/api/admin/token", {
-      method: "POST",
-      body: JSON.stringify({
-        mint_address: mint,
-        min_hold_amount: Math.floor(minHold),
-      })
-    });
-
-    // Read raw text first (works for JSON, HTML, or plain text)
-    const raw = await res.text();
-
-    // Try to parse JSON, but don't crash if it's not JSON
-    let data = null;
-    try { data = JSON.parse(raw); } catch {}
-
-    if (!res.ok) {
-      const msg =
-        (data && (data.detail || data.message)) ||
-        raw ||
-        `Save failed (HTTP ${res.status})`;
-      throw new Error(msg);
-    }
-
-    // ✅ Success feedback
-    statusEl.textContent = "✅ Token config saved successfully";
-    statusEl.className = "status success";
-
-    // Optional: show what backend saved (helps confirm it actually changed)
-    // statusEl.textContent = `✅ Saved: ${data.mint_address} / min ${data.min_hold_amount}`;
-
-    // Clear dependent UI
-    document.getElementById("previewOutput").textContent = "—";
-    document.getElementById("snapshotOutput").textContent = "—";
-
+    const r = await adminFetch(
+      `/api/admin/commit/start?commit_seconds=${seconds}`,
+      { method: "POST" }
+    );
+    commitOutput.textContent = JSON.stringify(await r.json(), null, 2);
     await loadState();
-
-  } catch (err) {
-    statusEl.textContent = err?.message || "Error saving token config";
-    statusEl.className = "status";
-  } finally {
-    stopLoading("btnSaveToken");
-  }
+  } finally { stopLoading("btnCommit"); }
 }
 
+async function startReveal() {
+  const seconds = getSeconds(revealH, revealM, revealS);
+  if (seconds < 10) return alert("Reveal duration must be at least 10 seconds");
+
+  startLoading("btnReveal");
+  try {
+    const r = await adminFetch(
+      `/api/admin/reveal/start?reveal_seconds=${seconds}`,
+      { method: "POST" }
+    );
+    revealOutput.textContent = JSON.stringify(await r.json(), null, 2);
+    await loadState();
+  } finally { stopLoading("btnReveal"); }
+}
+
+async function finalizeWinner() {
+  startLoading("btnFinalize");
+  try {
+    const r = await adminFetch("/api/admin/finalize", { method: "POST" });
+    finalizeOutput.textContent = JSON.stringify(await r.json(), null, 2);
+    await loadState();
+  } finally { stopLoading("btnFinalize"); }
+}
 
 async function previewHolders() {
   startLoading("btnPreview");
@@ -378,56 +396,14 @@ async function takeSnapshot() {
   } finally { stopLoading("btnSnapshot"); }
 }
 
-async function startCommit() {
-  startLoading("btnCommit");
-  try {
-    const r = await adminFetch(`/api/admin/commit/start?commit_minutes=${commitMinutesInput.value}`, { method: "POST" });
-    commitOutput.textContent = JSON.stringify(await r.json(), null, 2);
-    await loadState();
-  } finally { stopLoading("btnCommit"); }
-}
-
-async function startReveal() {
-  startLoading("btnReveal");
-  try {
-    const r = await adminFetch(`/api/admin/reveal/start?reveal_minutes=${revealMinutesInput.value}`, { method: "POST" });
-    revealOutput.textContent = JSON.stringify(await r.json(), null, 2);
-    await loadState();
-  } finally { stopLoading("btnReveal"); }
-}
-
-async function finalizeWinner() {
-  startLoading("btnFinalize");
-  try {
-    const r = await adminFetch("/api/admin/finalize", { method: "POST" });
-    finalizeOutput.textContent = JSON.stringify(await r.json(), null, 2);
-    await loadState();
-  } finally { stopLoading("btnFinalize"); }
-}
 async function resetRound() {
   startLoading("btnResetRound");
-
   try {
-    const res = await adminFetch("/api/admin/round/reset", {
-      method: "POST"
-    });
-
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Reset failed");
-
-    document.getElementById("resetOutput").textContent =
-      JSON.stringify(data, null, 2);
-
-    await loadState(); // refresh UI + buttons
-
-  } catch (err) {
-    document.getElementById("resetOutput").textContent =
-      err.message || "Reset failed";
-  } finally {
-    stopLoading("btnResetRound");
-  }
+    const r = await adminFetch("/api/admin/round/reset", { method: "POST" });
+    resetOutput.textContent = JSON.stringify(await r.json(), null, 2);
+    await loadState();
+  } finally { stopLoading("btnResetRound"); }
 }
-
 </script>
 
 </body>
