@@ -135,6 +135,7 @@
     <input id="commitMinutesInput" type="number" value="5" min="1" />
     <button id="btnCommit" onclick="startCommit()">Start Commit</button>
     <pre id="commitOutput">—</pre>
+    <div class="status" id="commitCountdown">—</div>
   </div>
 
   <div class="box">
@@ -142,6 +143,7 @@
     <input id="revealMinutesInput" type="number" value="5" min="1" />
     <button id="btnReveal" onclick="startReveal()">Start Reveal</button>
     <pre id="revealOutput">—</pre>
+    <div class="status" id="revealCountdown">—</div>
   </div>
 
   <div class="box">
@@ -155,6 +157,7 @@
 <script>
 const API_BASE = "https://bbcr-lottery.onrender.com";
 let lastKnownState = null;
+let countdownInterval = null;
 
 function startLoading(id) {
   const b = document.getElementById(id);
@@ -189,48 +192,92 @@ function getSecret() {
 }
 
 async function adminFetch(path, options = {}) {
+  const secret = getSecret();
+  if (!secret) throw new Error("Not authenticated");
+
   return fetch(API_BASE + path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      "X-Admin-Secret": getSecret()
+      "X-Admin-Secret": secret
     }
   });
 }
 
+function clearCountdown() {
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+}
+
+function startCountdown(deadlineISO, outputId) {
+  clearCountdown();
+  const output = document.getElementById(outputId);
+
+  function tick() {
+    const diff = new Date(deadlineISO).getTime() - Date.now();
+    if (diff <= 0) {
+      output.textContent = "⏳ 00:00";
+      clearCountdown();
+      return;
+    }
+    const m = Math.floor(diff / 60000);
+    const s = Math.floor((diff % 60000) / 1000);
+    output.textContent = `⏳ ${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  }
+
+  tick();
+  countdownInterval = setInterval(tick, 1000);
+}
+
 async function saveSecret() {
-  const v = document.getElementById("secretInput").value.trim();
+  const v = secretInput.value.trim();
   if (!v) return;
 
   try {
-    const res = await fetch(API_BASE + "/api/admin/state", {
+    const r = await fetch(API_BASE + "/api/admin/state", {
       headers: { "X-Admin-Secret": v }
     });
-    if (!res.ok) throw new Error();
+    if (!r.ok) throw new Error();
 
     localStorage.setItem("ADMIN_SECRET", v);
-    document.getElementById("loginStatus").textContent = "Authenticated";
-    document.getElementById("adminContent").style.display = "block";
+    loginStatus.textContent = "Authenticated";
+    adminContent.style.display = "block";
     await loadState();
   } catch {
-    document.getElementById("loginStatus").textContent = "Authentication failed";
+    loginStatus.textContent = "Authentication failed";
   }
 }
 
 async function loadState() {
-  const res = await adminFetch("/api/admin/state");
-  const data = await res.json();
-  document.getElementById("stateOutput").textContent = JSON.stringify(data, null, 2);
+  const r = await adminFetch("/api/admin/state");
+  const data = await r.json();
+
+  stateOutput.textContent = JSON.stringify(data, null, 2);
   lastKnownState = data.round.state;
   updateButtonsFromState();
+
+  clearCountdown();
+
+  if (data.round.state === "COMMIT" && data.round.commit_deadline) {
+    startCountdown(data.round.commit_deadline, "commitCountdown");
+  } else {
+    commitCountdown.textContent = "—";
+  }
+
+  if (data.round.state === "REVEAL" && data.round.reveal_deadline) {
+    startCountdown(data.round.reveal_deadline, "revealCountdown");
+  } else {
+    revealCountdown.textContent = "—";
+  }
 }
 
 async function previewHolders() {
   startLoading("btnPreview");
   try {
     const r = await adminFetch("/api/admin/holders/preview", { method: "POST" });
-    document.getElementById("previewOutput").textContent =
-      JSON.stringify(await r.json(), null, 2);
+    previewOutput.textContent = JSON.stringify(await r.json(), null, 2);
     await loadState();
   } finally { stopLoading("btnPreview"); }
 }
@@ -239,8 +286,7 @@ async function takeSnapshot() {
   startLoading("btnSnapshot");
   try {
     const r = await adminFetch("/api/admin/snapshot", { method: "POST" });
-    document.getElementById("snapshotOutput").textContent =
-      JSON.stringify(await r.json(), null, 2);
+    snapshotOutput.textContent = JSON.stringify(await r.json(), null, 2);
     await loadState();
   } finally { stopLoading("btnSnapshot"); }
 }
@@ -248,8 +294,7 @@ async function takeSnapshot() {
 async function startCommit() {
   startLoading("btnCommit");
   try {
-    const m = commitMinutesInput.value;
-    const r = await adminFetch(`/api/admin/commit/start?commit_minutes=${m}`, { method: "POST" });
+    const r = await adminFetch(`/api/admin/commit/start?commit_minutes=${commitMinutesInput.value}`, { method: "POST" });
     commitOutput.textContent = JSON.stringify(await r.json(), null, 2);
     await loadState();
   } finally { stopLoading("btnCommit"); }
@@ -258,8 +303,7 @@ async function startCommit() {
 async function startReveal() {
   startLoading("btnReveal");
   try {
-    const m = revealMinutesInput.value;
-    const r = await adminFetch(`/api/admin/reveal/start?reveal_minutes=${m}`, { method: "POST" });
+    const r = await adminFetch(`/api/admin/reveal/start?reveal_minutes=${revealMinutesInput.value}`, { method: "POST" });
     revealOutput.textContent = JSON.stringify(await r.json(), null, 2);
     await loadState();
   } finally { stopLoading("btnReveal"); }
