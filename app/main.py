@@ -11,7 +11,7 @@ import os
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from datetime import datetime
-
+import uuid
 app = FastAPI(title="Lottery Backend")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -170,4 +170,54 @@ def preview_holders(
             "burn_addresses": excluded_burn
         },
         "preview_time": datetime.utcnow().isoformat()
+    }
+@app.post("/api/admin/snapshot")
+def take_snapshot(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin)
+):
+    config = db.query(AdminConfig).first()
+
+    if config is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Admin config missing"
+        )
+
+    # Enforce one-time snapshot
+    if config.round_state != "IDLE":
+        raise HTTPException(
+            status_code=400,
+            detail="Snapshot already taken or round already started"
+        )
+
+    # Token config must exist
+    if not config.mint_address or not config.min_hold_amount:
+        raise HTTPException(
+            status_code=400,
+            detail="Token config not set"
+        )
+
+    # ---- SNAPSHOT DATA (mocked for now) ----
+    snapshot_id = str(uuid.uuid4())
+    snapshot_time = datetime.utcnow()
+    snapshot_slot = 123456789  # placeholder
+    eligible_holders = config.eligible_holders or 0
+    # ---------------------------------------
+
+    # Persist snapshot
+    config.snapshot_id = snapshot_id
+    config.snapshot_time = snapshot_time
+    config.snapshot_slot = snapshot_slot
+    config.eligible_holders = eligible_holders
+    config.round_state = "SNAPSHOT_TAKEN"
+
+    db.commit()
+
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_time": snapshot_time.isoformat(),
+        "snapshot_slot": snapshot_slot,
+        "eligible_holders": eligible_holders,
+        "state": config.round_state
     }
