@@ -297,6 +297,16 @@ def require_admin(x_admin_secret: str = Header(None)):
     if x_admin_secret != expected:
         raise HTTPException(status_code=403, detail="Forbidden")
 
+@app.get("/api/public/state")
+def get_public_state(db: Session = Depends(get_db)):
+    config = db.query(AdminConfig).first()
+    return {
+        "round_state": config.round_state,
+        "commit_deadline": config.commit_deadline,
+        "reveal_deadline": config.reveal_deadline,
+        "winner_wallet": config.winner_wallet,
+    }
+
 @app.get("/api/admin/state")
 def get_admin_state(db: Session = Depends(get_db), _: None = Depends(require_admin)):
     config = db.query(AdminConfig).first()
