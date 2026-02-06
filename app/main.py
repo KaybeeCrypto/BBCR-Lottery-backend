@@ -175,20 +175,14 @@ def memo_matches_expected(memo: dict, expected: dict) -> bool:
 
 
 def send_memo_tx(payload: dict) -> str:
-    """
-    Sends a Memo transaction signed by the authority wallet.
-    Returns tx signature (string). Fees are deducted from authority wallet automatically.
-    """
     kp = load_authority_keypair()
     client = solana_client()
 
-    # Compact JSON to keep memo small
     memo_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     memo_bytes = memo_str.encode("utf-8")
 
     memo_program = Pubkey.from_string(MEMO_PROGRAM_ID)
 
-    # Memo instruction: no accounts required
     ix = Instruction(
         program_id=memo_program,
         accounts=[],
@@ -196,39 +190,30 @@ def send_memo_tx(payload: dict) -> str:
     )
 
     bh_resp = client.get_latest_blockhash()
-
-    # Extract blockhash in a version-tolerant way
     if isinstance(bh_resp, dict):
         blockhash_val = bh_resp["result"]["value"]["blockhash"]
     else:
         blockhash_val = bh_resp.value.blockhash
 
-    # Normalize to solders.hash.Hash
     if isinstance(blockhash_val, Hash):
         recent_blockhash = blockhash_val
     else:
-        # blockhash_val is expected to be a string
         recent_blockhash = Hash.from_string(str(blockhash_val))
 
-
-    # Build v0 message
+    # IMPORTANT: positional args only
     msg = MessageV0.try_compile(
-        payer=kp.pubkey(),
-        instructions=[ix],
-        address_lookup_tables=[],
-        recent_blockhash=recent_blockhash,
+        kp.pubkey(),
+        [ix],
+        recent_blockhash,
     )
 
-    # Sign
     tx = VersionedTransaction(msg, [kp])
 
-    # Send. IMPORTANT: pass the VersionedTransaction directly.
     try:
         send_resp = client.send_transaction(tx)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to send memo tx: {e}")
 
-    # Extract signature
     if isinstance(send_resp, dict):
         sig = send_resp.get("result")
     else:
@@ -238,7 +223,6 @@ def send_memo_tx(payload: dict) -> str:
         raise HTTPException(status_code=502, detail=f"Memo tx send returned no signature: {send_resp}")
 
     return str(sig)
-
 
 # --- Protocol v1 helpers ---
 
