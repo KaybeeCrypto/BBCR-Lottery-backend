@@ -8,5 +8,5 @@ requests
 base58
 pynacl
 
-solana==0.29.2
-
+solana==0.36.11
+solders==0.27.1
