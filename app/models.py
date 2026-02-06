@@ -22,6 +22,12 @@ class AdminConfig(Base):
     __tablename__ = "admin_config"
 
     id = Column(Integer, primary_key=True)
+    
+    # Round info
+    snapshot_tx_sig = Column(String, nullable=True)
+    reveal_tx_sig = Column(String, nullable=True)
+    finalize_tx_sig = Column(String, nullable=True)
+    authority_pubkey = Column(String, nullable=True)
 
     # Token config
     mint_address = Column(String, nullable=True)
@@ -42,6 +48,8 @@ class AdminConfig(Base):
     target_slot = Column(Integer, nullable=True)
     blockhash = Column(String, nullable=True)
     winner_wallet = Column(String, nullable=True)
+
+    
 
         # --- Protocol v1 additions (deterministic + auditable) ---
 

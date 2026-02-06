@@ -3,7 +3,8 @@ uvicorn
 sqlalchemy
 psycopg2-binary
 python-dotenv
-requests
+solders
+solana
 base58
-pynacl
-
+solana>=0.34.0
+solders>=0.21.0

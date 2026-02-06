@@ -15,6 +15,74 @@ import uuid
 import hashlib
 import requests
 from fastapi import Response
+import json
+from solana.rpc.api import Client
+from solana.transaction import Transaction
+from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.instruction import Instruction, AccountMeta
+
+
+MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+
+def load_authority_keypair() -> Keypair:
+    raw = os.getenv("SOLANA_AUTHORITY_KEYPAIR_JSON")
+    if not raw:
+        raise HTTPException(status_code=500, detail="SOLANA_AUTHORITY_KEYPAIR_JSON not configured")
+    try:
+        arr = json.loads(raw)
+        secret = bytes(arr)
+        return Keypair.from_bytes(secret)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Invalid authority keypair JSON: {e}")
+
+def solana_client() -> Client:
+    rpc_url = os.getenv("SOLANA_RPC_URL")
+    if not rpc_url:
+        raise HTTPException(status_code=500, detail="SOLANA_RPC_URL not configured")
+    return Client(rpc_url)
+
+def send_memo_tx(payload: dict) -> str:
+    """
+    Sends a Memo transaction signed by the authority wallet.
+    Returns tx signature (string). Fees are deducted from authority wallet automatically.
+    """
+    kp = load_authority_keypair()
+    client = solana_client()
+
+    # Compact JSON to keep memo small
+    memo_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    memo_bytes = memo_str.encode("utf-8")
+
+    program_id = Pubkey.from_string(MEMO_PROGRAM_ID)
+
+    # Memo instruction: no accounts required
+    ix = Instruction(
+        program_id=program_id,
+        accounts=[],
+        data=memo_bytes
+    )
+
+    tx = Transaction()
+    tx.add(ix)
+
+    try:
+        resp = client.send_transaction(tx, kp)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to send memo tx: {e}")
+
+    # solana-py response shape varies; handle both
+    sig = None
+    if isinstance(resp, dict):
+        sig = resp.get("result")
+    else:
+        # Some versions return an object-like
+        sig = getattr(resp, "value", None) or getattr(resp, "result", None)
+
+    if not sig:
+        raise HTTPException(status_code=502, detail=f"Memo tx send returned no signature: {resp}")
+
+    return sig
 
 # --- Protocol v1 helpers ---
 
@@ -246,7 +314,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://www.commit-lottery.xyz"],
+    allow_origins=["https://kaybeecrypto.github.io"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -310,16 +378,55 @@ def get_public_state(db: Session = Depends(get_db), response: Response = None):
     if not config:
         raise HTTPException(status_code=500, detail="AdminConfig missing")
 
-    # Prevent GitHub Pages / browsers from caching state
+
+    # Prevent caching (important for GitHub Pages)
     if response is not None:
         response.headers["Cache-Control"] = "no-store"
 
     return {
+        # ---- existing top-level fields (keep for compatibility) ----
         "round_state": config.round_state,
         "commit_deadline": iso_z(config.commit_deadline),
         "reveal_deadline": iso_z(config.reveal_deadline),
         "winner_wallet": config.winner_wallet,
+
+        # ---- snapshot proof ----
+        "snapshot": {
+            "snapshot_id": config.snapshot_id,
+            "snapshot_slot": config.snapshot_slot,
+            "snapshot_root": config.snapshot_root,
+            "eligible_holders": config.eligible_holders,
+            "snapshot_tx": getattr(config, "snapshot_tx", None),
+        },
+
+        # ---- reveal phase (no on-chain anchor yet) ----
+        "reveal": {
+            "target_slot": config.target_slot,
+        },
+
+        # ---- finalize proof ----
+        "finalize": {
+            "winner_wallet": config.winner_wallet,
+            "winner_index": config.winner_index,
+            "blockhash": config.blockhash,
+            "finalize_tx": getattr(config, "finalize_tx", None),
+        },
     }
+
+@app.get("/api/public/snapshot/{snapshot_id}/canonical")
+def get_snapshot_canonical(snapshot_id: str, db: Session = Depends(get_db)):
+    config = db.query(AdminConfig).first()
+    if not config or config.snapshot_id != snapshot_id:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    if not config.eligible_canonical:
+        raise HTTPException(status_code=404, detail="Canonical snapshot missing")
+
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_root": config.snapshot_root,
+        "canonical": config.eligible_canonical,
+    }
+
 
 @app.get("/api/admin/state")
 def get_admin_state(db: Session = Depends(get_db), _: None = Depends(require_admin)):
@@ -340,6 +447,18 @@ def get_admin_state(db: Session = Depends(get_db), _: None = Depends(require_adm
             "commit_deadline": config.commit_deadline,
             "reveal_deadline": config.reveal_deadline,
         },
+    }
+
+@app.get("/api/admin/authority/balance")
+def authority_balance(db: Session = Depends(get_db), _: None = Depends(require_admin)):
+    kp = load_authority_keypair()
+    client = solana_client()
+    resp = client.get_balance(kp.pubkey())
+    lamports = resp["result"]["value"]
+    return {
+        "authority_pubkey": str(kp.pubkey()),
+        "lamports": lamports,
+        "sol": lamports / 1_000_000_000,
     }
 
 @app.post("/api/admin/token")
@@ -441,6 +560,24 @@ def take_snapshot(db: Session = Depends(get_db), _: None = Depends(require_admin
     config.eligible_canonical = canonical
     config.snapshot_root = snapshot_root
     config.round_state = "SNAPSHOT_TAKEN"
+    config.snapshot_tx_sig = snapshot_tx_sig
+    config.snapshot_tx_sig = snapshot_tx_sig
+
+    # Optional: store authority pubkey once
+    if not config.authority_pubkey:
+        config.authority_pubkey = str(load_authority_keypair().pubkey())
+
+        # Anchor snapshot on-chain (memo tx)
+    snap_payload = {
+        "p": "commit-lottery-v1",
+        "t": "snapshot",
+        "snapshot_id": snapshot_id,
+        "mint": config.mint_address,
+        "min_hold": str(min_hold),
+        "last_indexed_slot": str(snapshot_slot),
+        "snapshot_root": snapshot_root,
+    }
+    snapshot_tx_sig = send_memo_tx(snap_payload)
 
     db.commit()
 
@@ -482,6 +619,16 @@ def start_reveal_phase(reveal_minutes: int = 15, db: Session = Depends(get_db), 
     current_slot = helius_get_current_slot()
     slot_offset = 200  # ~ about 1–2 minutes on Solana; safe buffer
     config.target_slot = current_slot + slot_offset
+    
+    reveal_payload = {
+        "p": "commit-lottery-v1",
+        "t": "reveal_start",
+        "snapshot_id": config.snapshot_id,
+        "snapshot_root": config.snapshot_root,
+        "target_slot": str(config.target_slot),
+    }
+    reveal_tx_sig = send_memo_tx(reveal_payload)
+    config.reveal_tx_sig = reveal_tx_sig
 
     config.reveal_deadline = datetime.utcnow() + timedelta(minutes=reveal_minutes)
     config.round_state = "REVEAL"
@@ -491,6 +638,10 @@ def start_reveal_phase(reveal_minutes: int = 15, db: Session = Depends(get_db), 
         "state": config.round_state,
         "target_slot": config.target_slot,
         "reveal_deadline": config.reveal_deadline.isoformat(),
+        "state": config.round_state,
+        "target_slot": config.target_slot,
+        "reveal_deadline": config.reveal_deadline.isoformat(),
+        "reveal_tx_sig": reveal_tx_sig,
     }
 
 @app.post("/api/admin/finalize")
@@ -534,6 +685,20 @@ def finalize_winner(db: Session = Depends(get_db), _: None = Depends(require_adm
     config.winner_index = winner_index
     config.blockhash = blockhash
     config.round_state = "FINALIZED"
+
+    finalize_payload = {
+        "p": "commit-lottery-v1",
+        "t": "finalize",
+        "snapshot_id": config.snapshot_id,
+        "snapshot_root": config.snapshot_root,
+        "target_slot": str(config.target_slot),
+        "blockhash": blockhash,
+        "winner_index": int(winner_index),
+        "winner_wallet": winner_wallet,
+    }
+    finalize_tx_sig = send_memo_tx(finalize_payload)
+    config.finalize_tx_sig = finalize_tx_sig
+
 
     db.commit()
 
@@ -582,4 +747,3 @@ def reset_round(
         "message": "Round reset successfully",
         "round_state": config.round_state
     }
-
