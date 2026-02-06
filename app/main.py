@@ -480,16 +480,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://kaybeecrypto.github.io",
-        "https://www.kaybeecrypto.github.io",
-        "https://commitlottery.xyz",
-        "https://www.commitlottery.xyz",
-    ],
+    allow_origin_regex=r"https://(www\.)?commitlottery\.xyz",
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
+    max_age=86400,
 )
+
 
 
 @app.on_event("startup")
