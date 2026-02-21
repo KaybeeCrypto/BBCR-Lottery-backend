@@ -893,10 +893,13 @@ def take_snapshot(db: Session = Depends(get_db), _: None = Depends(require_admin
     snapshot_id = str(uuid.uuid4())
     snapshot_time = datetime.utcnow()
 
-      # Pull token accounts from Helius
     print("SNAPSHOT: fetching token accounts from Helius...")
     last_slot, token_accounts = helius_get_token_accounts_all(config.mint_address, limit=1000)
     print("SNAPSHOT: helius returned", {"last_slot": last_slot, "token_accounts": len(token_accounts)})
+
+    balances = aggregate_balances_by_owner(token_accounts)
+    print("SNAPSHOT: balances computed", {"unique_owners": len(balances)})
+
 
     # Build eligible list
     eligible = []
