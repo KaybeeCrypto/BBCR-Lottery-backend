@@ -480,11 +480,16 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://commit-protocol.xyz",
+        "https://www.commit-protocol.xyz",
+        "http://localhost:3000",
+    ],
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Admin-Secret"],
 )
+
 
 
 
@@ -892,10 +897,6 @@ def take_snapshot(db: Session = Depends(get_db), _: None = Depends(require_admin
     print("SNAPSHOT: fetching token accounts from Helius...")
     last_slot, token_accounts = helius_get_token_accounts_all(config.mint_address, limit=1000)
     print("SNAPSHOT: helius returned", {"last_slot": last_slot, "token_accounts": len(token_accounts)})
-
-    # Pull token accounts from Helius
-    last_slot, token_accounts = helius_get_token_accounts_all(config.mint_address, limit=1000)
-    balances = aggregate_balances_by_owner(token_accounts)
 
     # Build eligible list
     eligible = []
